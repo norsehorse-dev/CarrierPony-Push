@@ -31,21 +31,42 @@ if (!$row) {
 }
 
 $window = (int) (cp_config()['wake_coalesce_seconds'] ?? 45);
+$alertWindow = (int) (cp_config()['wake_alert_coalesce_seconds'] ?? 10);
+
+// Coalesce by priority. A real-message (non-silent) wake is suppressed only by
+// another recent ALERT, never by the silent control-op wakes (mailbox-key and
+// profile chatter) that fly during a conversation - otherwise a silent wake
+// claims the window and the banner wake right behind it is dropped, so the
+// recipient never sees the notification. A silent wake still coalesces against
+// any recent wake, keeping the background traffic down.
 $chk = $db->prepare(
-    'SELECT (last_wake_at IS NOT NULL AND last_wake_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? SECOND)) AS recent
+    'SELECT
+        (last_wake_at  IS NOT NULL AND last_wake_at  > DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? SECOND)) AS recent_any,
+        (last_alert_at IS NOT NULL AND last_alert_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? SECOND)) AS recent_alert
      FROM gateway_devices WHERE id = ?'
 );
-$chk->execute([$window, (int) $row['id']]);
-$recent = (int) ($chk->fetchColumn() ?: 0);
+$chk->execute([$window, $alertWindow, (int) $row['id']]);
+$rc = $chk->fetch();
+$recentAny   = (int) ($rc['recent_any'] ?? 0);
+$recentAlert = (int) ($rc['recent_alert'] ?? 0);
 
-if ($recent === 1) {
+$coalesced = $silent ? ($recentAny === 1) : ($recentAlert === 1);
+if ($coalesced) {
     $db->prepare('UPDATE gateway_devices SET last_active = UTC_TIMESTAMP() WHERE id = ?')
         ->execute([(int) $row['id']]);
     cp_json(200, ['ok' => true, 'woke' => false, 'coalesced' => true]);
 }
 
 cp_gw_wake($row, $silent);
-$db->prepare('UPDATE gateway_devices SET last_wake_at = UTC_TIMESTAMP(), last_active = UTC_TIMESTAMP() WHERE id = ?')
-    ->execute([(int) $row['id']]);
+if ($silent) {
+    $db->prepare('UPDATE gateway_devices SET last_wake_at = UTC_TIMESTAMP(), last_active = UTC_TIMESTAMP() WHERE id = ?')
+        ->execute([(int) $row['id']]);
+} else {
+    // A non-silent wake advances BOTH clocks: it counts as recent activity and
+    // as the last alert, so a burst of real messages coalesces on the short
+    // alert window while silent wakes coalesce on the longer one.
+    $db->prepare('UPDATE gateway_devices SET last_wake_at = UTC_TIMESTAMP(), last_alert_at = UTC_TIMESTAMP(), last_active = UTC_TIMESTAMP() WHERE id = ?')
+        ->execute([(int) $row['id']]);
+}
 
 cp_json(200, ['ok' => true, 'woke' => true]);

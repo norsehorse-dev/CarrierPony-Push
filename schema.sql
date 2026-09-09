@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS gateway_devices (
   created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_active  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_wake_at DATETIME         NULL,
+  last_alert_at DATETIME        NULL,
   UNIQUE KEY uq_device (device_id),
   UNIQUE KEY uq_wake (wake_token),
   KEY k_active (last_active)
